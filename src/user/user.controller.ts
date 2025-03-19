@@ -1,19 +1,28 @@
 import {
-  Controller,
-  Get,
-  Post,
+  BadRequestException,
   Body,
+  Controller,
+  DefaultValuePipe,
+  Get,
   Inject,
+  ParseIntPipe,
+  Post,
   Query,
-  UnauthorizedException,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
-import { UserService } from './user.service';
-import { RegisterUserDto } from './dto/register-user.dto';
-import { RedisService } from 'src/redis/redis.service';
+import { RequireLogin, UserInfo } from 'src/custom.decorator';
 import { EmailService } from 'src/email/email.service';
+import { RedisService } from 'src/redis/redis.service';
 import { LoginUserDto } from './dto/login-user.dto';
-import { JwtService } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
+import { RegisterUserDto } from './dto/register-user.dto';
+import { UserService } from './user.service';
+import { UserDetailVo } from './vo/user-info.vo';
+import { UpdateUserPasswordDto } from './dto/update-password.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { FileInterceptor } from '@nestjs/platform-express';
+import * as path from 'path';
+import { storage } from 'src/my-file-storage';
 
 @Controller('user')
 export class UserController {
@@ -23,12 +32,6 @@ export class UserController {
 
   @Inject(EmailService)
   private emailService: EmailService;
-
-  @Inject(JwtService)
-  private jwtService: JwtService;
-
-  @Inject(ConfigService)
-  private configService: ConfigService;
 
   @Post('register')
   async register(@Body() registerUserDto: RegisterUserDto) {
@@ -52,25 +55,7 @@ export class UserController {
 
   @Post('login')
   async userLogin(@Body() loginUserDto: LoginUserDto) {
-    const vo = await this.userService.login(loginUserDto);
-    vo.accessToken = this.jwtService.sign(
-      {
-        userId: vo.userInfo.id,
-        username: vo.userInfo.username,
-        roles: vo.userInfo.roles,
-        permissions: vo.userInfo.permissions,
-      },
-      { expiresIn: this.configService.get('jwt_access_token_expires_time') },
-    );
-
-    vo.refreshToken = this.jwtService.sign(
-      {
-        userId: vo.userInfo.id,
-      },
-      { expiresIn: this.configService.get('jwt_refresh_token_expires_time') },
-    );
-
-    return vo;
+    return await this.userService.login(loginUserDto);
   }
 
   @Post('admin/login')
@@ -80,81 +65,109 @@ export class UserController {
 
   @Get('refresh')
   async refresh(@Query('refreshToken') refreshToken: string) {
-    try {
-      const data: { userId: number } = this.jwtService.verify(refreshToken);
-
-      const user = await this.userService.findUserById(data.userId, false);
-
-      const access_token = this.jwtService.sign(
-        {
-          userId: user.id,
-          username: user.username,
-          roles: user.roles,
-          permissions: user.permissions,
-        },
-        {
-          expiresIn:
-            this.configService.get('jwt_access_token_expires_time') || '30m',
-        },
-      );
-
-      const refresh_token = this.jwtService.sign(
-        {
-          userId: user.id,
-        },
-        {
-          expiresIn:
-            this.configService.get('jwt_refresh_token_expires_time') || '7d',
-        },
-      );
-
-      return {
-        access_token,
-        refresh_token,
-      };
-    } catch (e) {
-      console.log('🚀 ~ UserController ~ refresh ~ e:', e);
-      throw new UnauthorizedException('token 已失效，请重新登录');
-    }
+    return await this.userService.refreshToken(refreshToken);
   }
 
   @Get('admin/refresh')
   async adminRefresh(@Query('refreshToken') refreshToken: string) {
-    try {
-      const data: { userId: number } = this.jwtService.verify(refreshToken);
+    return await this.userService.refreshToken(refreshToken);
+  }
 
-      const user = await this.userService.findUserById(data.userId, true);
+  @Get('info')
+  @RequireLogin()
+  async info(@Query('userId') userId: number) {
+    const user = await this.userService.getUserInfoById(userId);
 
-      const access_token = this.jwtService.sign(
-        {
-          userId: user.id,
-          username: user.username,
-          roles: user.roles,
-          permissions: user.permissions,
-        },
-        {
-          expiresIn:
-            this.configService.get('jwt_access_token_expires_time') || '30m',
-        },
-      );
+    if (user) {
+      const vo = new UserDetailVo();
+      vo.id = user.id;
+      vo.email = user.email;
+      vo.username = user.username;
+      vo.headPic = user.headPic;
+      vo.phoneNumber = user.phoneNumber;
+      vo.nickName = user.nickName;
+      vo.createTime = user.createTime;
+      vo.isFrozen = user.isFrozen;
 
-      const refresh_token = this.jwtService.sign(
-        {
-          userId: user.id,
-        },
-        {
-          expiresIn:
-            this.configService.get('jwt_refresh_token_expires_time') || '7d',
-        },
-      );
-
-      return {
-        access_token,
-        refresh_token,
-      };
-    } catch (e) {
-      console.log('🚀 ~ UserController ~ adminRefresh ~ e:', e);
-      throw new UnauthorizedException('token 已失效，请重新登录');
+      return vo;
     }
+  }
+
+  @Post(['update', 'admin/update'])
+  @RequireLogin()
+  async update(@Body() updateUserDto: UpdateUserDto) {
+    return await this.userService.update(updateUserDto);
+  }
+
+  @Post('update-password')
+  async updatePassword(
+    @UserInfo('userId') userId: number,
+    @Body() updateUserPasswordDto: UpdateUserPasswordDto,
+  ) {
+    return await this.userService.updatePassword(userId, updateUserPasswordDto);
+  }
+
+  @Get('list')
+  async list(
+    @Query(
+      'pageNo',
+      new DefaultValuePipe(1),
+      new ParseIntPipe({
+        exceptionFactory() {
+          throw new BadRequestException('page 必须为数字');
+        },
+      }),
+    )
+    pageNo: number,
+    @Query(
+      'pageSize',
+      new DefaultValuePipe(10),
+      new ParseIntPipe({
+        exceptionFactory() {
+          throw new BadRequestException('pageSize 必须为数字');
+        },
+      }),
+    )
+    pageSize: number,
+    @Query('username') username: string,
+    @Query('nickName') nickName: string,
+    @Query('email') email: string,
+  ) {
+    return await this.userService.findUsersByPage({
+      pageNo,
+      pageSize,
+      username,
+      nickName,
+      email,
+    });
+  }
+
+  @Post('upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      dest: 'uploads',
+      limits: {
+        fileSize: 1024 * 1024 * 3,
+      },
+      storage: storage,
+      fileFilter(req, file, callback) {
+        const extname = path.extname(file.originalname);
+        if (['.png', '.jpg', '.gif'].includes(extname)) {
+          callback(null, true);
+        } else {
+          callback(new BadRequestException('只能上传图片'), false);
+        }
+      },
+    }),
+  )
+  uploadFile(@UploadedFile() file: Express.Multer.File) {
+    console.log('🚀 ~ UserController ~ uploadFile ~ file:', file);
+
+    return file.path;
+  }
+
+  @Post('freeze')
+  async freeze(@Body('userId') userId: number) {
+    return await this.userService.freezeUser(userId);
   }
 }

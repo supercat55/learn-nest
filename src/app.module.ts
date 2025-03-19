@@ -1,16 +1,24 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
 
+import { APP_GUARD } from '@nestjs/core';
+import { JwtModule } from '@nestjs/jwt';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { UserModule } from './user/user.module';
+import { EmailModule } from './email/email.module';
+import { LoginGuard } from './login.guard';
+import { MeetingRoom } from './meeting-room/entities/meeting-room.entity';
+import { MeetingRoomModule } from './meeting-room/meeting-room.module';
+import { PermissionGuard } from './permission.guard';
+import { RedisModule } from './redis/redis.module';
+import { Permission } from './user/entities/permission.entity';
 import { Role } from './user/entities/role.entity';
 import { User } from './user/entities/user.entity';
-import { Permission } from './user/entities/permission.entity';
-import { RedisModule } from './redis/redis.module';
-import { EmailModule } from './email/email.module';
-import { JwtModule } from '@nestjs/jwt';
+import { UserModule } from './user/user.module';
+import { BookingModule } from './booking/booking.module';
+import { Booking } from './booking/entities/booking.entity';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -28,7 +36,7 @@ import { JwtModule } from '@nestjs/jwt';
           database: configService.get('mysql_server_database'),
           synchronize: true,
           logging: true,
-          entities: [User, Role, Permission],
+          entities: [User, Role, Permission, MeetingRoom, Booking],
           poolSize: 10,
           connectorPackage: 'mysql2',
           extra: {
@@ -39,6 +47,7 @@ import { JwtModule } from '@nestjs/jwt';
       inject: [ConfigService],
     }),
     JwtModule.registerAsync({
+      global: true,
       useFactory(configService: ConfigService) {
         return {
           secret: configService.get('jwt_secret'),
@@ -52,8 +61,20 @@ import { JwtModule } from '@nestjs/jwt';
     UserModule,
     RedisModule,
     EmailModule,
+    MeetingRoomModule,
+    BookingModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: LoginGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: PermissionGuard,
+    },
+  ],
 })
 export class AppModule {}
